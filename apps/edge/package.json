@@ -1,0 +1,19 @@
+{
+  "name": "@ig-analytics/edge",
+  "version": "0.1.0",
+  "description": "Supabase Edge Functions for job orchestration and data export.",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@ig-analytics/shared": "workspace:*",
+    "@supabase/supabase-js": "^2.39.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.5",
+    "typescript": "^5.3.3"
+  }
+}
