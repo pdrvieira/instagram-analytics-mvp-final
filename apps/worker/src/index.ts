@@ -147,7 +147,7 @@ async function processJob(job: SyncJob): Promise<void> {
           await client.initBrowser(sessionPayload, false); // headless mode for scraping
 
           const { followers, following } = await client.scrapeFollowers(profile.data.ig_username);
-          processedItems = await supabaseService.syncFollowers(job.profile_id, job.user_id, [...followers, ...following]);
+          processedItems = await supabaseService.syncFollowers(job.profile_id, job.user_id, followers, following);
         }
         break;
 

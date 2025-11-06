@@ -6,6 +6,19 @@
 -- Ensure the 'public' schema is used
 SET search_path = public;
 
+-- Drop existing tables if they exist (in reverse dependency order)
+DROP TABLE IF EXISTS alerts CASCADE;
+DROP TABLE IF EXISTS sync_jobs CASCADE;
+DROP TABLE IF EXISTS hashtags_metrics CASCADE;
+DROP TABLE IF EXISTS profile_insights_daily CASCADE;
+DROP TABLE IF EXISTS media_metrics CASCADE;
+DROP TABLE IF EXISTS media CASCADE;
+DROP TABLE IF EXISTS follower_changes CASCADE;
+DROP TABLE IF EXISTS followers_snapshots CASCADE;
+DROP TABLE IF EXISTS followers CASCADE;
+DROP TABLE IF EXISTS ig_sessions CASCADE;
+DROP TABLE IF EXISTS profiles CASCADE;
+
 -- 1. Table: profiles
 -- Stores user's connected Instagram profile information
 CREATE TABLE profiles (
@@ -105,8 +118,11 @@ CREATE TABLE followers (
     follower_username text NOT NULL,
     follower_name text,
     follower_pic_url text,
-    is_following_back boolean DEFAULT FALSE NOT NULL,
+    is_verified boolean DEFAULT FALSE NOT NULL,
+    is_private boolean DEFAULT FALSE NOT NULL,
+    is_follower boolean DEFAULT FALSE NOT NULL, -- True if this user follows the profile
     is_following boolean DEFAULT FALSE NOT NULL, -- True if the profile is following this user
+    is_following_back boolean DEFAULT FALSE NOT NULL, -- True if both follow each other
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     UNIQUE (profile_id, follower_ig_id)
@@ -148,10 +164,24 @@ CREATE TABLE followers_snapshots (
     user_id uuid REFERENCES auth.users(id) ON DELETE CASCADE NOT NULL,
     captured_at timestamp with time zone DEFAULT now() NOT NULL,
     total_followers integer NOT NULL,
+    total_following integer NOT NULL,
     new_followers integer DEFAULT 0 NOT NULL,
     lost_followers integer DEFAULT 0 NOT NULL,
-    non_followers integer DEFAULT 0 NOT NULL,
+    non_followers integer DEFAULT 0 NOT NULL, -- Following but not following back
     snapshot_data jsonb, -- Store the list of follower IDs for diffing
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+-- 4b. Table: follower_changes
+-- Stores individual follower/unfollower events for detailed tracking
+CREATE TABLE follower_changes (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    profile_id uuid REFERENCES profiles(id) ON DELETE CASCADE NOT NULL,
+    user_id uuid REFERENCES auth.users(id) ON DELETE CASCADE NOT NULL,
+    follower_ig_id text NOT NULL,
+    follower_username text NOT NULL,
+    change_type text NOT NULL, -- NEW_FOLLOWER, UNFOLLOWED, STARTED_FOLLOWING, STOPPED_FOLLOWING
+    detected_at timestamp with time zone DEFAULT now() NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
@@ -176,6 +206,27 @@ ON followers_snapshots FOR DELETE
 TO service_role
 USING (TRUE);
 
+-- Index for follower changes
+CREATE INDEX idx_follower_changes_profile_detected ON follower_changes (profile_id, detected_at DESC);
+
+-- RLS: Users can only see their own follower change events
+ALTER TABLE follower_changes ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Allow select for authenticated users based on user_id"
+ON follower_changes FOR SELECT
+TO authenticated
+USING (auth.uid() = user_id);
+
+CREATE POLICY "Allow insert for service role only"
+ON follower_changes FOR INSERT
+TO service_role
+WITH CHECK (TRUE);
+
+CREATE POLICY "Allow delete for service role only"
+ON follower_changes FOR DELETE
+TO service_role
+USING (TRUE);
+
 
 -- 5. Table: media
 -- Stores posts, reels, and stories metadata
@@ -184,10 +235,16 @@ CREATE TABLE media (
     profile_id uuid REFERENCES profiles(id) ON DELETE CASCADE NOT NULL,
     user_id uuid REFERENCES auth.users(id) ON DELETE CASCADE NOT NULL,
     ig_media_id text UNIQUE NOT NULL,
+    shortcode text NOT NULL,
     media_type text NOT NULL, -- IMAGE, VIDEO, CAROUSEL, STORY
     caption text,
+    hashtags text[] DEFAULT ARRAY[]::text[], -- Array of hashtags extracted from caption
+    mentions text[] DEFAULT ARRAY[]::text[], -- Array of mentioned usernames
     media_url text,
     permalink text,
+    likes_count integer DEFAULT 0 NOT NULL,
+    comments_count integer DEFAULT 0 NOT NULL,
+    video_views integer,
     timestamp timestamp with time zone NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL
@@ -315,7 +372,7 @@ TO service_role
 USING (TRUE);
 
 
--- 8. Table: hashtags_metrics
+-- 7. Table: hashtags_metrics
 -- Stores derived metrics per hashtag
 CREATE TABLE hashtags_metrics (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -324,7 +381,9 @@ CREATE TABLE hashtags_metrics (
     hashtag text NOT NULL,
     usage_count integer DEFAULT 0 NOT NULL,
     total_engagement integer DEFAULT 0 NOT NULL,
-    avg_engagement_per_post numeric DEFAULT 0.0 NOT NULL,
+    avg_engagement numeric DEFAULT 0.0 NOT NULL,
+    first_used timestamp with time zone,
+    last_used timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     UNIQUE (profile_id, hashtag)
@@ -386,7 +445,12 @@ ON sync_jobs FOR SELECT
 TO authenticated
 USING (auth.uid() = user_id);
 
-CREATE POLICY "Allow insert for service role only"
+CREATE POLICY "Allow insert for authenticated users"
+ON sync_jobs FOR INSERT
+TO authenticated
+WITH CHECK (auth.uid() = user_id);
+
+CREATE POLICY "Allow insert for service role"
 ON sync_jobs FOR INSERT
 TO service_role
 WITH CHECK (TRUE);
